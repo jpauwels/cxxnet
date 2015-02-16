@@ -59,6 +59,16 @@ public:
     if (!strcmp(name, "label_width")) {
       label_width_ = atoi(val);
     }
+    if (!strcmp(name, "channel_selection")) {
+      if (!strcmp(val, "color") || !strcmp(val, "colour"))
+        channel_selection_ = CV_LOAD_IMAGE_COLOR;
+      else if (!strcmp(val, "grayscale") || !strcmp(val, "greyscale"))
+        channel_selection_ = CV_LOAD_IMAGE_GRAYSCALE;
+      else if (!strcmp(val, "original"))
+        channel_selection_ = CV_LOAD_IMAGE_UNCHANGED;
+      else
+        utils::Error("Unknown channel selector '%s'", val);
+    }
   }
   virtual void Init(void) {
     this->ParseImageConf();
@@ -126,17 +136,25 @@ protected:
   inline static void LoadImage(mshadow::TensorContainer<cpu, 3> &img,
                                DataInst &out,
                                std::vector<unsigned char> &buf) {
-    cv::Mat res = cv::imdecode(buf, 1);
+    cv::Mat res = cv::imdecode(buf, channel_selection_);
     utils::Assert(res.data != NULL, "decoding fail");
 
-    img.Resize(mshadow::Shape3(3, res.rows, res.cols));
-    for (index_t y = 0; y < img.size(1); ++y) {
-      for (index_t x = 0; x < img.size(2); ++x) {
-        cv::Vec3b bgr = res.at<cv::Vec3b>(y, x);
-        // store in RGB order
-        img[2][y][x] = bgr[0];
-        img[1][y][x] = bgr[1];
-        img[0][y][x] = bgr[2];
+    img.Resize(mshadow::Shape3(res.channels(), res.rows, res.cols));
+    if (img.size(0) == 1) {
+      for (index_t y = 0; y < img.size(1); ++y) {
+        for (index_t x = 0; x < img.size(2); ++x) {
+          img[0][y][x] = res.at<uchar>(y, x);
+        }
+      }
+    } else {
+      for (index_t y = 0; y < img.size(1); ++y) {
+        for (index_t x = 0; x < img.size(2); ++x) {
+          cv::Vec3b bgr = res.at<cv::Vec3b>(y, x);
+          // store in RGB order //cvtColor(res, res, CV_BGR2RGB);
+          img[2][y][x] = bgr[0];
+          img[1][y][x] = bgr[1];
+          img[0][y][x] = bgr[2];
+        }
       }
     }
     out.data = img;
@@ -179,6 +197,8 @@ protected:
   std::string img_conf_prefix_, img_conf_ids_;
   /*! \brief raw image list */
   std::string raw_imglst_, raw_imgbin_;
+  /*! \brief channel selector */
+  static int channel_selection_;
   /*! \brief temp storage for label */
   mshadow::TensorContainer<cpu, 1> label_;
   /*! \brief temp storage for image */
@@ -281,5 +301,6 @@ protected:
   int     ptop_;
   utils::ThreadBuffer<PagePtr, Factory> itr;
 }; // class ThreadImagePageIterator
+int ThreadImagePageIterator::channel_selection_ = CV_LOAD_IMAGE_UNCHANGED;
 }; // namespace cxxnet
 #endif

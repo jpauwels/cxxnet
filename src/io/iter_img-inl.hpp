@@ -34,6 +34,16 @@ public:
     if(!strcmp(name, "silent"  ))  silent_ = atoi(val);
     if(!strcmp(name, "shuffle"  ))  shuffle_ = atoi(val);
     if(!strcmp(name, "label_width"  ))  label_width_ = atoi(val);
+    if (!strcmp(name, "channel_selection")) {
+      if (!strcmp(val, "color") || !strcmp(val, "colour"))
+        channel_selection_ = CV_LOAD_IMAGE_COLOR;
+      else if (!strcmp(val, "grayscale") || !strcmp(val, "greyscale"))
+        channel_selection_ = CV_LOAD_IMAGE_GRAYSCALE;
+      else if (!strcmp(val, "original"))
+        channel_selection_ = CV_LOAD_IMAGE_UNCHANGED;
+      else
+        utils::Error("Unknown channel selector '%s'", val);
+    }
   }
   virtual void Init(void) {
     fplst_  = utils::FopenCheck(path_imglst_.c_str(), "r");
@@ -91,7 +101,7 @@ protected:
   inline static void LoadImage(mshadow::TensorContainer<cpu,3> &img, 
           DataInst &out,
           const char *fname) {
-    cv::Mat res = cv::imread(fname);
+    cv::Mat res = cv::imread(fname, channel_selection_);
     utils::Assert(res.data != NULL, "LoadImage: Reading image %s failed.\n", fname);
     img.Resize(mshadow::Shape3(3, res.rows, res.cols));
     for(index_t y = 0; y < img.size(1); ++y) {
@@ -122,6 +132,8 @@ protected:
   int shuffle_;
   // denotes the number of labels
   int label_width_;
+  /*! \brief channel selector */
+  static int channel_selection_;
   // denotes the current data index
   int data_index_;
   // stores the reading orders
@@ -132,6 +144,7 @@ protected:
   std::vector<std::string> filenames_;
   // stores the index list of images
   std::vector<int> index_list_;
-  };
+};
+int ImageIterator::channel_selection_ = CV_LOAD_IMAGE_UNCHANGED;
 };
 #endif

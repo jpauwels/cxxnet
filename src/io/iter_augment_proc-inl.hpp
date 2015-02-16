@@ -5,6 +5,7 @@
  * \brief processing unit to do data augmention
  * \author Tianqi Chen, Bing Xu, Naiyan Wang
  */
+#include <sstream>
 #include <mshadow/tensor.h>
 #include "data.h"
 #include "../utils/utils.h"
@@ -40,9 +41,6 @@ public:
     max_shear_ratio_ = 0.0f;
     min_crop_size_ = -1;
     max_crop_size_ = -1;
-    mean_r_ = 0.0f;
-    mean_g_ = 0.0f;
-    mean_b_ = 0.0f;
     mirror_ = 0;
     rotate_ = -1.0f;
   }
@@ -81,8 +79,14 @@ public:
       }
     }
     if (!strcmp(name, "mean_value")) {
-      utils::Assert(sscanf(val, "%f,%f,%f", &mean_b_, &mean_g_, &mean_r_) == 3,
-                    "mean value must be three consecutive float without space example: 128,127.5,128.2 ");
+      std::istringstream meanStream(val);
+      float mean;
+      while (meanStream >> mean) {
+        means_.push_back(mean);
+        meanStream.ignore(1, ',');
+      }
+      utils::Assert(means_.size() > 0,
+                    "mean_value must be one or more floats, separated by commas, e.g. '128,127.5,128.2'");
     }
   }
   virtual void Init(void) {
@@ -125,20 +129,35 @@ private:
     out_.label = d.label;
     out_.index = d.index;
     img_.Resize(mshadow::Shape3(d.data.shape_[0], shape_[1], shape_[2]));
+    utils::Assert(d.data.size(0) == shape_[0],
+                  "The number of channels in the image should match the number of network inputs");
+    utils::Assert(!meanfile_ready_ || d.data.size(0) == meanimg_.size(0),
+                  "The number of channels in the mean image should be the same as in the image");
+    utils::Assert(means_.size() == 0 || means_.size() == d.data.size(0),
+                  "The dimensions of the mean value should match the number of image channels");
     if (shape_[1] == 1) {
       img_ = d.data * scale_;
     } else {
       utils::Assert(d.data.size(1) >= shape_[1] && d.data.size(2) >= shape_[2],
         "Data size must be bigger than the input size to net.");
       #if CXXNET_USE_OPENCV
-      cv::Mat res(d.data.size(1), d.data.size(2), CV_8UC3);
+      cv::Mat res(d.data.size(1), d.data.size(2), CV_8UC(d.data.size(0)));
       index_t out_h = d.data.size(1);
       index_t out_w = d.data.size(2);
-      for (index_t i = 0; i < d.data.size(1); ++i) {
-        for (index_t j = 0; j < d.data.size(2); ++j) {
-          res.at<cv::Vec3b>(i, j)[0] = d.data[2][i][j];
-          res.at<cv::Vec3b>(i, j)[1] = d.data[1][i][j];
-          res.at<cv::Vec3b>(i, j)[2] = d.data[0][i][j];
+      if (d.data.size(0) == 1) {
+        for (index_t y = 0; y < d.data.size(1); ++y) {
+          for (index_t x = 0; x < d.data.size(2); ++x) {
+            res.at<uchar>(y, x) = d.data[0][y][x];
+          }
+        }
+      } else {
+        for (index_t y = 0; y < d.data.size(1); ++y) {
+          for (index_t x = 0; x < d.data.size(2); ++x) {
+            // store in BGR order
+            res.at<cv::Vec3b>(y, x)[0] = d.data[2][y][x];
+            res.at<cv::Vec3b>(y, x)[1] = d.data[1][y][x];
+            res.at<cv::Vec3b>(y, x)[2] = d.data[0][y][x];
+          }
         }
       }
       if (max_rotate_angle_ > 0 || max_shear_ratio_ > 0.0f
@@ -188,12 +207,21 @@ private:
         out_h = shape_[1];
         out_w = shape_[2];
       }
-      for (index_t i = 0; i < out_h; ++i) {
-        for (index_t j = 0; j < out_w; ++j) {
-          cv::Vec3b bgr = res.at<cv::Vec3b>(i, j);
-          d.data[0][i][j] = bgr[2];
-          d.data[1][i][j] = bgr[1];
-          d.data[2][i][j] = bgr[0];
+      if (d.data.size(0) == 1) {
+        for (index_t y = 0; y < d.data.size(1); ++y) {
+          for (index_t x = 0; x < d.data.size(2); ++x) {
+            d.data[0][y][x] = res.at<uchar>(y, x);
+          }
+        }
+      } else {
+        for (index_t y = 0; y < d.data.size(1); ++y) {
+          for (index_t x = 0; x < d.data.size(2); ++x) {
+            // store in RGB order
+            cv::Vec3b bgr = res.at<cv::Vec3b>(y, x);
+            d.data[0][y][x] = bgr[2];
+            d.data[1][y][x] = bgr[1];
+            d.data[2][y][x] = bgr[0];
+          }
         }
       }
       res.release();
@@ -213,8 +241,11 @@ private:
         if (crop_y_start_ != -1) yy = crop_y_start_;
         if (crop_x_start_ != -1) xx = crop_x_start_;
       }
-      if (mean_r_ > 0.0f || mean_g_ > 0.0f || mean_b_ > 0.0f) {
-        d.data[0] -= mean_b_; d.data[1] -= mean_g_; d.data[2] -= mean_r_;
+      if (means_.size() > 0) {
+      if (means_.size() > 0) {
+        for (size_t i = 0; i < means_.size(); ++i) {
+          img_[i] -= means_[i];
+        }
         if ((rand_mirror_ != 0 && utils::NextDouble() < 0.5f) || mirror_ == 1) {
           img_ = mirror(crop(d.data, img_[0].shape_, yy, xx)) * scale_;
         } else {
@@ -269,7 +300,7 @@ private:
     utils::StdFile fo(name_meanimg_.c_str(), "wb");
     meanimg_.SaveBinary(fo);
     if (silent_ == 0) {
-      printf("save mean image to %s..\n", name_meanimg_.c_str());
+      printf("\nsave mean image to %s..\n", name_meanimg_.c_str());
     }
     this->BeforeFirst();
   }
@@ -313,12 +344,8 @@ private:
   int max_crop_size_;
   /*! \brief min crop size */
   int min_crop_size_;
-  /*! \brief mean value for r channel */
-  float mean_r_;
-  /*! \brief mean value for g channel */
-  float mean_g_;
-  /*! \brief mean value for b channel */
-  float mean_b_;
+  /*! \brief mean values for all channels */
+  std::vector<float> means_;
   /*! \brief whether mean file is ready */
   bool meanfile_ready_;
   /*! \brief whether to mirror the image */
