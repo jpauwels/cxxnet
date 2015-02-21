@@ -138,28 +138,8 @@ protected:
                                std::vector<unsigned char> &buf) {
     cv::Mat res = cv::imdecode(buf, channel_selection_);
     utils::Assert(res.data != NULL, "decoding fail");
-
-    img.Resize(mshadow::Shape3(res.channels(), res.rows, res.cols));
-    if (img.size(0) == 1) {
-      for (index_t y = 0; y < img.size(1); ++y) {
-        for (index_t x = 0; x < img.size(2); ++x) {
-          img[0][y][x] = res.at<uchar>(y, x);
-        }
-      }
-    } else {
-      for (index_t y = 0; y < img.size(1); ++y) {
-        for (index_t x = 0; x < img.size(2); ++x) {
-          cv::Vec3b bgr = res.at<cv::Vec3b>(y, x);
-          // store in RGB order //cvtColor(res, res, CV_BGR2RGB);
-          img[2][y][x] = bgr[0];
-          img[1][y][x] = bgr[1];
-          img[0][y][x] = bgr[2];
-        }
-      }
-    }
-    out.data = img;
-    // free memory
-    res.release();
+    res.addref();
+    out.data = mshadow::Tensor<mshadow::cpu, 3>(reinterpret_cast<float*>(res.data), mshadow::Shape3(res.channels(), res.rows, res.cols), static_cast<index_t>(res.step1()), NULL);
   }
   inline void NextBuffer(std::vector<unsigned char> &buf) {
     while (ptop_ >= page_.page->Size()) {

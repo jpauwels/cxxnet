@@ -125,41 +125,20 @@ public:
 private:
   inline void SetData(const DataInst &d) {
     using namespace mshadow::expr;
-    bool cut = false;
     out_.label = d.label;
     out_.index = d.index;
-    img_.Resize(mshadow::Shape3(d.data.shape_[0], shape_[1], shape_[2]));
     utils::Assert(d.data.size(0) == shape_[0],
                   "The number of channels in the image should match the number of network inputs");
     utils::Assert(!meanfile_ready_ || d.data.size(0) == meanimg_.size(0),
                   "The number of channels in the mean image should be the same as in the image");
     utils::Assert(means_.size() == 0 || means_.size() == d.data.size(0),
                   "The dimensions of the mean value should match the number of image channels");
-    if (shape_[1] == 1) {
-      img_ = d.data * scale_;
-    } else {
-      utils::Assert(d.data.size(1) >= shape_[1] && d.data.size(2) >= shape_[2],
-        "Data size must be bigger than the input size to net.");
-      #if CXXNET_USE_OPENCV
-      cv::Mat res(d.data.size(1), d.data.size(2), CV_8UC(d.data.size(0)));
-      index_t out_h = d.data.size(1);
-      index_t out_w = d.data.size(2);
-      if (d.data.size(0) == 1) {
-        for (index_t y = 0; y < d.data.size(1); ++y) {
-          for (index_t x = 0; x < d.data.size(2); ++x) {
-            res.at<uchar>(y, x) = d.data[0][y][x];
-          }
-        }
-      } else {
-        for (index_t y = 0; y < d.data.size(1); ++y) {
-          for (index_t x = 0; x < d.data.size(2); ++x) {
-            // store in BGR order
-            res.at<cv::Vec3b>(y, x)[0] = d.data[2][y][x];
-            res.at<cv::Vec3b>(y, x)[1] = d.data[1][y][x];
-            res.at<cv::Vec3b>(y, x)[2] = d.data[0][y][x];
-          }
-        }
-      }
+    img_.Resize(mshadow::Shape3(shape_[0], shape_[1], shape_[2]));
+    #if CXXNET_USE_OPENCV
+    cv::Mat res(d.data.size(1), d.data.size(2), CV_8UC(d.data.size(0)), d.data.dptr_, d.data.stride_);
+    index_t out_h = d.data.size(1);
+    index_t out_w = d.data.size(2);
+    if (shape_[1] > 1) {
       if (max_rotate_angle_ > 0 || max_shear_ratio_ > 0.0f
           || rotate_ > 0 || rotate_list_.size() > 0) {
         int angle = utils::NextUInt32(max_rotate_angle_ * 2) - max_rotate_angle_;
@@ -202,30 +181,37 @@ private:
         if (crop_x_start_ != -1) x = crop_x_start_;
         cv::Rect roi(x, y, crop_size_x, crop_size_y);
         res = res(roi);
-        cut = true;
-        cv::resize(res, res, cv::Size(shape_[1], shape_[2]));
-        out_h = shape_[1];
-        out_w = shape_[2];
       }
-      if (d.data.size(0) == 1) {
-        for (index_t y = 0; y < d.data.size(1); ++y) {
-          for (index_t x = 0; x < d.data.size(2); ++x) {
-            d.data[0][y][x] = res.at<uchar>(y, x);
-          }
-        }
-      } else {
-        for (index_t y = 0; y < d.data.size(1); ++y) {
-          for (index_t x = 0; x < d.data.size(2); ++x) {
-            // store in RGB order
-            cv::Vec3b bgr = res.at<cv::Vec3b>(y, x);
-            d.data[0][y][x] = bgr[2];
-            d.data[1][y][x] = bgr[1];
-            d.data[2][y][x] = bgr[0];
-          }
+      cv::resize(res, res, cv::Size(shape_[1], shape_[2]));
+      out_h = shape_[1];
+      out_w = shape_[2];
+    } else {
+      res *= scale_;
+    }
+    if (shape_[0] == 1) {
+      for (index_t y = 0; y < shape_[1]; ++y) {
+        for (index_t x = 0; x < shape_[2]; ++x) {
+          img_[0][y][x] = res.at<uchar>(y, x);
         }
       }
-      res.release();
-      #endif
+    } else {
+      for (index_t y = 0; y < shape_[1]; ++y) {
+        for (index_t x = 0; x < shape_[2]; ++x) {
+          // store in RGB order
+          cv::Vec3b bgr = res.at<cv::Vec3b>(y, x);
+          img_[0][y][x] = bgr[2];
+          img_[1][y][x] = bgr[1];
+          img_[2][y][x] = bgr[0];
+        }
+      }
+    }
+    out_.data = img_;
+    #else
+    if (shape_[1] == 1) {
+      img_ = d.data * scale_;
+    } else {
+      utils::Assert(d.data.size(1) >= shape_[1] && d.data.size(2) >= shape_[2],
+                    "Data size must be bigger than the input size to net.");
       mshadow::index_t yy = d.data.size(1) - shape_[1];
       mshadow::index_t xx = d.data.size(2) - shape_[2];
       if (rand_crop_ != 0) {
@@ -275,6 +261,7 @@ private:
       }
     }
     out_.data = img_;
+    #endif
   }
   inline void CreateMeanImg(void) {
     if (silent_ == 0) {
