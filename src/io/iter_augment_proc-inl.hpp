@@ -105,6 +105,20 @@ public:
         meanimg_.LoadBinary(fs);
         fclose(fi);
       }
+      #if CXXNET_USE_OPENCV
+      // convert mean image to cv::Mat
+      cv::Mat floatImg;
+      if (meanimg_.size(0) == 1) {
+        floatImg = cv::Mat(meanimg_.size(1), meanimg_.size(2), CV_32FC1, meanimg_.dptr_);
+      } else {
+        cv::Mat r_pixels(meanimg_.size(1), meanimg_.size(2), CV_32FC1, &meanimg_[0][0][0]);
+        cv::Mat g_pixels(meanimg_.size(1), meanimg_.size(2), CV_32FC1, &meanimg_[1][0][0]);
+        cv::Mat b_pixels(meanimg_.size(1), meanimg_.size(2), CV_32FC1, &meanimg_[2][0][0]);
+        cv::Mat reordered_pixels[] = {b_pixels, g_pixels, r_pixels};
+        cv::merge(reordered_pixels, 3, floatImg);
+      }
+      floatImg.convertTo(meanOpenCVImage_, CV_8U);
+      #endif
       meanfile_ready_ = true;
     }
   }
@@ -136,16 +150,15 @@ private:
     img_.Resize(mshadow::Shape3(shape_[0], shape_[1], shape_[2]));
     #if CXXNET_USE_OPENCV
     cv::Mat res(d.data.size(1), d.data.size(2), CV_8UC(d.data.size(0)), d.data.dptr_, d.data.stride_);
-    index_t out_h = d.data.size(1);
-    index_t out_w = d.data.size(2);
+    bool meanSubtracted = false;
     if (shape_[1] > 1) {
+      // Affine transformation
       if (max_rotate_angle_ > 0 || max_shear_ratio_ > 0.0f
           || rotate_ > 0 || rotate_list_.size() > 0) {
         int angle = utils::NextUInt32(max_rotate_angle_ * 2) - max_rotate_angle_;
         if (rotate_ > 0) angle = rotate_;
         if (rotate_list_.size() > 0) angle = rotate_list_[utils::NextUInt32(rotate_list_.size() - 1)];
         int len = std::max(res.cols, res.rows);
-        cv::Point2f pt(len / 2.0f, len / 2.0f);
         cv::Mat M(2, 3, CV_32F);
         float cs = cos(angle / 180.0 * M_PI);
         float sn = sin(angle / 180.0 * M_PI);
@@ -163,31 +176,40 @@ private:
               cv::Scalar(255, 255, 255));
         res = temp;
       }
-      if (min_crop_size_ > 0 && max_crop_size_ > 0) {
-        int crop_size_x = utils::NextUInt32(max_crop_size_ - min_crop_size_ + 1) + \
-                                       min_crop_size_;
-        int crop_size_y = crop_size_x * (1 + utils::NextDouble() * \
-                                                      max_aspect_ratio_ * 2 - max_aspect_ratio_);
-        crop_size_y = std::max(min_crop_size_, std::min(crop_size_y, max_crop_size_));
-        mshadow::index_t y = res.rows - crop_size_y;
-        mshadow::index_t x = res.cols - crop_size_x;
-        if (rand_crop_ != 0) {
-          y = utils::NextUInt32(y + 1);
-          x = utils::NextUInt32(x + 1);
-        } else {
-          y /= 2; x /= 2;
-        }
-        if (crop_y_start_ != -1) y = crop_y_start_;
-        if (crop_x_start_ != -1) x = crop_x_start_;
-        cv::Rect roi(x, y, crop_size_x, crop_size_y);
-        res = res(roi);
+      // Subtracting mean image
+      if (res.rows == meanOpenCVImage_.rows && res.cols == meanOpenCVImage_.cols && meanfile_ready_) {
+        res -= meanOpenCVImage_;
+        meanSubtracted = true;
       }
+      // Cropping
+      int crop_width;
+      int crop_height;
+      if (min_crop_size_ > 0 && max_crop_size_ > 0) {
+        crop_width = utils::NextUInt32(max_crop_size_ - min_crop_size_ + 1) + \
+                                       min_crop_size_;
+        crop_height = crop_width * (1 + utils::NextDouble() * \
+                                                      max_aspect_ratio_ * 2 - max_aspect_ratio_);
+        crop_height = std::max(min_crop_size_, std::min(crop_height, max_crop_size_));
+      } else {
+        crop_width = shape_[2];
+        crop_height = shape_[1];
+      }
+      mshadow::index_t topleft_y;
+      mshadow::index_t topleft_x;
+      if (rand_crop_ != 0) {
+        topleft_y = utils::NextUInt32(res.rows - crop_height + 1);
+        topleft_x = utils::NextUInt32(res.cols - crop_width + 1);
+      } else {
+        topleft_y = cvRound((res.rows - crop_height) / 2.);
+        topleft_x = cvRound((res.cols - crop_width) / 2.);
+      }
+      if (crop_y_start_ != -1) topleft_y = crop_y_start_;
+      if (crop_x_start_ != -1) topleft_x = crop_x_start_;
+      cv::Rect roi(topleft_x, topleft_y, crop_width, crop_height);
+      res = res(roi);
       cv::resize(res, res, cv::Size(shape_[1], shape_[2]));
-      out_h = shape_[1];
-      out_w = shape_[2];
-    } else {
-      res *= scale_;
     }
+    // Convert to mshadow tensor
     if (shape_[0] == 1) {
       for (index_t y = 0; y < shape_[1]; ++y) {
         for (index_t x = 0; x < shape_[2]; ++x) {
@@ -205,6 +227,20 @@ private:
         }
       }
     }
+    // Subtract mean image
+    if (!meanSubtracted && shape_ == meanimg_.shape_ && meanfile_ready_) {
+      img_ -= meanimg_;
+    }
+    if (means_.size() > 0) {
+      for (size_t i = 0; i < means_.size(); ++i)
+        img_[i] -= means_[i];
+    }
+    // Mirror
+    if ((rand_mirror_ != 0 && utils::NextDouble() < 0.5f) || mirror_ == 1) {
+      img_ = mirror(img_);
+    }
+    // Scale
+    img_ *= scale_;
     out_.data = img_;
     #else
     if (shape_[1] == 1) {
@@ -212,51 +248,47 @@ private:
     } else {
       utils::Assert(d.data.size(1) >= shape_[1] && d.data.size(2) >= shape_[2],
                     "Data size must be bigger than the input size to net.");
-      mshadow::index_t yy = d.data.size(1) - shape_[1];
-      mshadow::index_t xx = d.data.size(2) - shape_[2];
+      if (max_crop_size_ > 0 || min_crop_size_ > 0 || max_aspect_ratio_ > 0 || max_rotate_angle_ > 0 || max_shear_ratio_ > 0.0f || rotate_ > 0 || rotate_list_.size() > 0) {
+        utils::Error("Unsupported data augmentation option");
+      }
+      // Determine cropping anchor point
+      mshadow::index_t topleft_y;
+      mshadow::index_t topleft_x;
       if (rand_crop_ != 0) {
-        yy = utils::NextUInt32(yy + 1);
-        xx = utils::NextUInt32(xx + 1);
+        topleft_y = utils::NextUInt32(d.data.size(1) - shape_[1] + 1);
+        topleft_x = utils::NextUInt32(d.data.size(2) - shape_[2] + 1);
       } else {
-        yy /= 2; xx /= 2;
+        topleft_y = cvRound((d.data.size(1) - shape_[1]) / 2.);
+        topleft_x = cvRound((d.data.size(2) - shape_[2]) / 2.);
       }
-      if (cut) {
-        yy = 0;
-        xx = 0;
-      } else {
-        if (crop_y_start_ != -1) yy = crop_y_start_;
-        if (crop_x_start_ != -1) xx = crop_x_start_;
-      }
-      if (means_.size() > 0) {
-      if (means_.size() > 0) {
-        for (size_t i = 0; i < means_.size(); ++i) {
-          img_[i] -= means_[i];
-        }
-        if ((rand_mirror_ != 0 && utils::NextDouble() < 0.5f) || mirror_ == 1) {
-          img_ = mirror(crop(d.data, img_[0].shape_, yy, xx)) * scale_;
-        } else {
-          img_ = crop(d.data, img_[0].shape_, yy, xx) * scale_ ;
-        }
-      } else if (!meanfile_ready_ || name_meanimg_.length() == 0) {
-        if (rand_mirror_ != 0 && utils::NextDouble() < 0.5f) {
-          img_ = mirror(crop(d.data, img_[0].shape_, yy, xx)) * scale_;
-        } else {
-          img_ = crop(d.data, img_[0].shape_, yy, xx) * scale_ ;
-        }
-      } else {
+      if (crop_y_start_ != -1) topleft_y = crop_y_start_;
+      if (crop_x_start_ != -1) topleft_x = crop_x_start_;
+      // Mean subtraction, cropping, mirroring and scaling
+      if (meanfile_ready_) {
         // substract mean image
         if ((rand_mirror_ != 0 && utils::NextDouble() < 0.5f) || mirror_ == 1) {
           if (d.data.shape_ == meanimg_.shape_){
-            img_ = mirror(crop(d.data - meanimg_, img_[0].shape_, yy, xx)) * scale_;
+            img_ = mirror(crop(d.data - meanimg_, img_[0].shape_, topleft_y, topleft_x)) * scale_;
           } else {
-            img_ = mirror(crop(d.data, img_[0].shape_, yy, xx) - meanimg_) * scale_;
+            img_ = mirror(crop(d.data, img_[0].shape_, topleft_y, topleft_x) - meanimg_) * scale_;
           }
         } else {
           if (d.data.shape_ == meanimg_.shape_){
-            img_ = crop(d.data - meanimg_, img_[0].shape_, yy, xx) * scale_ ;
+            img_ = crop(d.data - meanimg_, img_[0].shape_, topleft_y, topleft_x) * scale_ ;
           } else {
-            img_ = (crop(d.data, img_[0].shape_, yy, xx) - meanimg_) * scale_;
+            img_ = (crop(d.data, img_[0].shape_, topleft_y, topleft_x) - meanimg_) * scale_;
           }
+        }
+      } else {
+        if (means_.size() > 0) {
+          for (size_t i = 0; i < means_.size(); ++i) {
+            img_[i] -= means_[i];
+          }
+        }
+        if (rand_mirror_ != 0 && utils::NextDouble() < 0.5f || mirror_ == 1) {
+          img_ = mirror(crop(d.data, img_[0].shape_, topleft_y, topleft_x)) * scale_;
+        } else {
+          img_ = crop(d.data, img_[0].shape_, topleft_y, topleft_x) * scale_ ;
         }
       }
     }
@@ -295,7 +327,7 @@ private:
   /*! \brief base iterator */
   IIterator<DataInst> *base_;
   /*! \brief input shape */
-  mshadow::Shape<4> shape_;
+  mshadow::Shape<3> shape_;
   /*! \brief output data */
   DataInst out_;
   /*! \brief skip read */
@@ -316,6 +348,10 @@ private:
   int num_overflow_;
   /*! \brief mean image, if needed */
   mshadow::TensorContainer<cpu, 3> meanimg_;
+  /*! \brief mean image in OpenCV format, if needed */
+  #if CXXNET_USE_OPENCV
+  cv::Mat meanOpenCVImage_;
+  #endif
   /*! \brief temp space */
   mshadow::TensorContainer<cpu, 3> img_;
   /*! \brief mean image file, if specified, will generate mean image file, and substract by mean */
