@@ -43,6 +43,7 @@ public:
     max_crop_size_ = -1;
     mirror_ = 0;
     rotate_ = -1.0f;
+    resize_ = "none";
   }
   virtual ~AugmentIterator(void) {
     delete base_;
@@ -88,6 +89,7 @@ public:
       utils::Assert(means_.size() > 0,
                     "mean_value must be one or more floats, separated by commas, e.g. '128,127.5,128.2'");
     }
+    if (!strcmp(name, "resize")) resize_ = val;
   }
   virtual void Init(void) {
     base_->Init();
@@ -152,6 +154,29 @@ private:
     cv::Mat res(d.data.size(1), d.data.size(2), CV_8UC(d.data.size(0)), d.data.dptr_, d.data.stride_);
     bool meanSubtracted = false;
     if (shape_[1] > 1) {
+      // Resizing
+      if (resize_ == "none") {
+      } else if (resize_ == "hard") { // breaks aspect ratio
+        cv::resize(res, res, cv::Size(shape_[1], shape_[2]));
+      } else if (resize_ == "area") { // flattens
+      } else {
+        float imageAspectRatio = static_cast<float>(res.cols) / res.rows;
+        float networkAspectRatio = static_cast<float>(shape_[2]) / shape_[1];
+        cv::Rect roi;
+        if (resize_ == "inner") { // preserves aspect ratio
+          if (imageAspectRatio > networkAspectRatio) {
+            int resizeWidth = cvRound(res.rows * networkAspectRatio);
+            roi = cv::Rect((res.cols - resizeWidth)/2, 0, resizeWidth, res.rows);
+          } else {
+            int resizeHeight = cvRound(res.cols * networkAspectRatio);
+            roi = cv::Rect(0, (res.rows - resizeHeight)/2, res.cols, resizeHeight);
+          }
+        } else if (resize_ == "outer") { // preserves aspect ratio
+          
+        }
+        res = res(roi);
+        cv::resize(res, res, cv::Size(shape_[1], shape_[2]));
+      }
       // Affine transformation
       if (max_rotate_angle_ > 0 || max_shear_ratio_ > 0.0f
           || rotate_ > 0 || rotate_list_.size() > 0) {
@@ -377,6 +402,8 @@ private:
   int rotate_;
   /*! \brief list of possible rotate angle */
   std::vector<int> rotate_list_;
+  /*! \brief resizing selector */
+  std::string resize_;
 };  // class AugmentIterator
 }  // namespace cxxnet
 #endif
